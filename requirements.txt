@@ -1,0 +1,2 @@
+# Fork de fast-flights con calendario de precios (get_calendar_graph)
+fast-flights @ git+https://github.com/jumping2000/google-flights.git

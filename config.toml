@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────
+#  Alertas de vuelos baratos desde Sevilla (SVQ)
+#  Precios: IDA Y VUELTA, 1 adulto, turista, EUR, cualquier aerolínea.
+#  Edita los umbrales a tu gusto; el resto puede quedarse como está.
+# ─────────────────────────────────────────────────────────────
+
+origen = "SVQ"
+moneda = "EUR"
+
+# Cuántos días hacia delante se rastrean (Google suele publicar ~330).
+horizonte_dias = 180
+
+# Duraciones del viaje (noches) que se comprueban. Cada duración multiplica
+# el número de consultas: [3] = escapada, [3, 7] = escapada + semana.
+duraciones = [3, 7]
+
+# Escalas: -1 = cualquiera, 0 = solo directos, 1 = máx. 1 escala
+max_escalas = -1
+
+# Una bajada solo se avisa si es de al menos esta cantidad (evita ruido de céntimos).
+bajada_minima_eur = 2
+
+# Tamaño de cada bloque de fechas pedido a Google y pausa entre peticiones.
+bloque_dias = 60
+pausa_segundos = 2.0
+
+# ─── Umbrales por grupo (EUR, ida y vuelta) ──────────────────
+# Un destino usa el umbral de su grupo salvo que tenga uno propio en [umbral_destino].
+[grupos.nacional]
+umbral = 30
+destinos = ["LCG","ALC","LEI","OVD","BCN","BIO","IBZ","MAD","PMI","PNA","EAS","SDR","SCQ","VLC","VIT"]
+
+[grupos.canarias_melilla]
+umbral = 45
+destinos = ["FUE","LPA","ACE","TFN","MLN"]
+
+[grupos.portugal_francia]
+umbral = 35
+destinos = ["LIS","OPO","BOD","BES","LYS","MRS","MPL","NTE","BVA","CDG","ORY","RNS","TLS","BSL"]
+
+[grupos.reino_unido_irlanda]
+umbral = 35
+destinos = ["BHX","BRS","EDI","LPL","LHR","LGW","LTN","STN","MAN","DUB","ORK"]
+
+[grupos.europa_central_norte]
+umbral = 45
+destinos = ["AMS","EIN","RTM","BRU","CRL","FKB","BER","CGN","DUS","NRN","FRA","HAM","MUC","NUE","GVA","ZRH","CPH"]
+
+[grupos.italia]
+umbral = 35
+destinos = ["BRI","BLQ","CAG","CTA","MXP","BGY","PSA","FCO","TSF","TRS","TRN","VCE"]
+
+[grupos.europa_este]
+umbral = 50
+destinos = ["BEG","OTP","BUD","KRK","PRG","WAW","WRO"]
+
+[grupos.marruecos]
+umbral = 45
+destinos = ["CMN","ESU","RAK","RBA"]
+
+[grupos.turquia]
+umbral = 80
+destinos = ["IST","SAW"]
+
+# ─── Umbrales específicos que sustituyen al del grupo ────────
+[umbral_destino]
+# MAD = 40
+# LHR = 90
