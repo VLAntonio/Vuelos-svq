@@ -1,0 +1,54 @@
+name: Alertas vuelos SVQ
+
+on:
+  schedule:
+    - cron: "17 5,11,17,23 * * *"   # 4 veces al día (UTC): 6:17, 12:17, 18:17, 0:17 en Madrid (invierno)
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "normal | sin-enviar | prueba-aviso"
+        default: normal
+
+permissions:
+  contents: write          # para guardar estado.json en el repo
+
+concurrency:
+  group: alertas-vuelos
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Buscar precios y avisar
+        env:
+          SMTP_USUARIO: ${{ secrets.SMTP_USUARIO }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}
+          WHATSAPP_TELEFONO: ${{ secrets.WHATSAPP_TELEFONO }}
+          WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
+        run: |
+          MODO="${{ github.event.inputs.modo || 'normal' }}"
+          case "$MODO" in
+            sin-enviar)   python vuelos_alerta.py --sin-enviar ;;
+            prueba-aviso) python vuelos_alerta.py --prueba-aviso ;;
+            *)            python vuelos_alerta.py ;;
+          esac
+
+      - name: Guardar estado
+        if: always()
+        run: |
+          git config user.name  "alertas-bot"
+          git config user.email "alertas-bot@users.noreply.github.com"
+          git add estado.json 2>/dev/null || exit 0
+          git diff --cached --quiet || (git commit -m "estado $(date -u +%F_%H%M)" && git push)
