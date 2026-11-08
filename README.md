@@ -1,56 +1,56 @@
-# Alertas de vuelos baratos desde Sevilla (SVQ)
+name: Alertas vuelos SVQ
 
-El programa vigila los **87 destinos** que salen de Sevilla según Aena, con todas las aerolíneas y escalas permitidas. Usa el calendario de precios de Google Flights para cada fecha de salida de los próximos 180 días, en viajes de ida y vuelta de 3 y 7 noches.
+on:
+  schedule:
+    - cron: "17 5,11,17,23 * * *"   # 4 veces al día (UTC): 6:17, 12:17, 18:17, 0:17 en Madrid (invierno)
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "normal | sin-enviar | prueba-aviso"
+        default: normal
 
-Te avisa por **correo** y/o **WhatsApp** en dos casos:
-1. Un precio **baja del umbral** de su destino.
-2. Estando ya por debajo, **vuelve a bajar** al menos 2 € respecto al último precio visto.
+permissions:
+  contents: write          # para guardar estado.json en el repo
 
-Si un precio sube por encima del umbral, ese viaje se rearma y vuelve a avisarte cuando baje otra vez. Se ejecuta solo en GitHub Actions 4 veces al día, así que no necesitas tener ningún ordenador encendido.
+concurrency:
+  group: alertas-vuelos
+  cancel-in-progress: false
 
-## Puesta en marcha (≈15 min)
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
 
-### 1. Crear el repositorio
-- Crea un repositorio en GitHub y sube esta carpeta tal cual, incluida `.github/`.
-- **Hazlo público si puedes.** Una pasada completa tarda unos 25 minutos. Los repos privados gratuitos tienen 2.000 min/mes de Actions, y no llegan para 4 pasadas diarias. En los públicos es ilimitado. El repo no contiene nada privado: tus claves van en *secrets*, que nunca se ven. Si lo prefieres privado, deja 2 ejecuciones al día en `alertas.yml` o una sola duración en `config.toml`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
 
-### 2. Correo (Gmail)
-1. Activa la verificación en dos pasos de tu cuenta de Google.
-2. Crea una **contraseña de aplicación** en <https://myaccount.google.com/apppasswords>.
-3. En el repo, ve a *Settings → Secrets and variables → Actions → New repository secret* y crea estos tres secrets:
-   - `SMTP_USUARIO`: tu dirección de Gmail
-   - `SMTP_PASSWORD`: la contraseña de aplicación (16 letras)
-   - `EMAIL_DESTINO`: el correo donde quieres recibir los avisos (puede ser el mismo)
+      - run: pip install -r requirements.txt
 
-### 3. WhatsApp (CallMeBot, gratis)
-1. Añade a tus contactos el número que indica <https://www.callmebot.com/blog/free-api-whatsapp-messages/>. Comprueba el número en esa web, porque a veces cambia.
-2. Envíale por WhatsApp el mensaje `I allow callmebot to send me messages`.
-3. Te responderá con tu **apikey**. Crea estos dos secrets:
-   - `WHATSAPP_TELEFONO`: `+34XXXXXXXXX`
-   - `WHATSAPP_APIKEY`: la clave recibida
+      - name: Buscar precios y avisar
+        env:
+          SMTP_USUARIO: ${{ secrets.SMTP_USUARIO }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}
+          WHATSAPP_TELEFONO: ${{ secrets.WHATSAPP_TELEFONO }}
+          WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MODO="${{ github.event.inputs.modo || 'normal' }}"
+          case "$MODO" in
+            sin-enviar)   python vuelos_alerta.py --sin-enviar ;;
+            prueba-aviso) python vuelos_alerta.py --prueba-aviso ;;
+            *)            python vuelos_alerta.py ;;
+          esac
 
-Si solo configuras uno de los dos canales, el otro se ignora.
-
-### 4. Probar
-En la pestaña *Actions*, abre **Alertas vuelos SVQ** y pulsa *Run workflow*. El campo `modo` admite tres valores:
-- `prueba-aviso`: manda un aviso falso para comprobar el correo y el WhatsApp.
-- `sin-enviar`: hace una pasada real, guarda los precios y no te notifica. Así **evitas la avalancha de avisos de la primera vez**, porque al empezar todo lo que esté bajo el umbral cuenta como nuevo.
-- `normal`: el funcionamiento automático.
-
-## Ajustes (`config.toml`)
-- **Umbrales**: hay uno por grupo de destinos (nacional 30 €, Europa 35–50 €, Turquía 80 €…). Para un destino concreto, usa `[umbral_destino]`, por ejemplo `MAD = 40`. Los valores iniciales son orientativos; ajústalos.
-- `duraciones`: las noches de viaje que se comprueban. Cada valor añade unas 260 consultas por pasada.
-- `max_escalas`: `-1` permite cualquier número de escalas y `0` deja solo los directos.
-- `horizonte_dias`: hasta cuántos días vista se busca.
-
-Para probarlo en local:
-```
-pip install -r requirements.txt
-python vuelos_alerta.py --sin-enviar
-python -m unittest -v
-```
-
-## Limitaciones
-- Google Flights no tiene API oficial. La librería `fast-flights` lee los datos que muestra su web, así que **puede dejar de funcionar** si Google cambia algo. Si ninguna petición funciona, el run sale en rojo y GitHub te manda un correo.
-- Los precios son los de Google Flights, que incluye prácticamente todas las aerolíneas, Ryanair incluida. Aun así, el precio final en la web de la aerolínea puede variar algo por equipaje o tasas de pago.
-- Solo se buscan viajes de ida y vuelta con duración fija, porque es lo que ofrece el calendario de precios de la librería.
+      - name: Guardar estado
+        if: always()
+        run: |
+          git config user.name  "alertas-bot"
+          git config user.email "alertas-bot@users.noreply.github.com"
+          git add estado.json 2>/dev/null || exit 0
+          git diff --cached --quiet || (git commit -m "estado $(date -u +%F_%H%M)" && git push)
