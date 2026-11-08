@@ -61,7 +61,7 @@ edad_conductor = 30              # menores de 25 suelen pagar recargo
 hora_recogida = "12:00"          # el día de llegada
 hora_devolucion = "10:00"        # el día de vuelta
 max_mostrados = 3
-presupuesto_mensual = 40         # ajústalo al límite de tu plan de RapidAPI
+presupuesto_mensual = 20         # ajústalo al límite de tu plan de RapidAPI
 cache_dias = 2
 
 # ─── Umbrales por grupo (EUR) ───────────────────────────────
