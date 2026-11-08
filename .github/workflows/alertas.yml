@@ -37,6 +37,8 @@ jobs:
           EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}
           WHATSAPP_TELEFONO: ${{ secrets.WHATSAPP_TELEFONO }}
           WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           MODO="${{ github.event.inputs.modo || 'normal' }}"
           case "$MODO" in
