@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -20,7 +21,7 @@ ORDEN_SERPAPI = {"relevancia": None, "precio": 3, "valoracion": 8, "opiniones": 
 
 
 def activo(cfg: dict) -> bool:
-    return bool(cfg.get("hoteles", {}).get("activado", False) and os.getenv("SERPAPI_KEY"))
+    return bool(cfg.get("hoteles", {}).get("activado", False) and clave_api())
 
 
 # ─────────────────────────── enlaces ───────────────────────────
@@ -119,16 +120,28 @@ def filtrar(respuesta: dict, noches: int, umbral_noche: float, cfg_h: dict) -> l
 
 
 # ─────────────────────────── consulta ───────────────────────────
+def clave_api() -> str:
+    return (os.getenv("SERPAPI_KEY") or "").strip()
+
+
 def _pedir(params: dict) -> dict:
     url = URL_API + "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=60) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # SerpApi explica el motivo en el cuerpo de la respuesta (clave inválida, cuenta sin verificar…)
+        try:
+            detalle = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except Exception:
+            detalle = ""
+        raise RuntimeError(f"HTTP {exc.code} de SerpApi: {detalle or exc.reason}") from None
 
 
 def buscar(destino: str, entrada: str, salida: str, cfg_h: dict, umbral_noche: float,
            pedir=_pedir) -> tuple[list[dict], dict]:
     """Devuelve (alojamientos_que_cumplen, enlaces_filtrados)."""
-    clave = os.getenv("SERPAPI_KEY")
+    clave = clave_api()
     if not clave:
         raise RuntimeError("falta SERPAPI_KEY")
     ciudad = ciudades.ciudad_hotel(destino)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -22,8 +23,12 @@ def activo(cfg: dict) -> bool:
     return bool(cfg.get("coches", {}).get("activado", False))
 
 
+def clave_api() -> str:
+    return (os.getenv("RAPIDAPI_KEY") or "").strip()
+
+
 def con_precios() -> bool:
-    return bool(os.getenv("RAPIDAPI_KEY"))
+    return bool(clave_api())
 
 
 def enlace_kayak(aeropuerto: str, ida: str, vuelta: str, cfg_c: dict) -> str:
@@ -34,10 +39,16 @@ def enlace_kayak(aeropuerto: str, ida: str, vuelta: str, cfg_c: dict) -> str:
 
 def _get(path: str, params: dict) -> dict:
     url = f"https://{HOST}{path}?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"x-rapidapi-key": os.environ["RAPIDAPI_KEY"],
-                                               "x-rapidapi-host": HOST})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode("utf-8"))
+    req = urllib.request.Request(url, headers={"x-rapidapi-key": clave_api(), "x-rapidapi-host": HOST})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detalle = json.loads(exc.read().decode("utf-8")).get("message", "")
+        except Exception:
+            detalle = ""
+        raise RuntimeError(f"HTTP {exc.code} de RapidAPI: {detalle or exc.reason}") from None
 
 
 def _num(x):
