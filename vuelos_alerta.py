@@ -16,6 +16,7 @@ Uso:
 Variables de entorno (todas opcionales; sin ellas ese canal se desactiva):
   SMTP_USUARIO, SMTP_PASSWORD, EMAIL_DESTINO, [SMTP_SERVIDOR=smtp.gmail.com, SMTP_PUERTO=465]
   WHATSAPP_TELEFONO (+34...), WHATSAPP_APIKEY   (CallMeBot)
+  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID              (bot de Telegram)
 """
 from __future__ import annotations
 
@@ -222,19 +223,36 @@ def enviar_correo(asunto: str, html: str, texto: str) -> bool:
     return True
 
 
-def enviar_whatsapp(texto: str) -> bool:
-    tel, key = os.getenv("WHATSAPP_TELEFONO"), os.getenv("WHATSAPP_APIKEY")
-    if not (tel and key):
-        return False
-    # CallMeBot admite mensajes largos, pero se trocea por seguridad.
+def trocear(texto: str, maximo: int = 1500) -> list[str]:
     trozos, actual = [], ""
     for ln in texto.split("\n"):
-        if len(actual) + len(ln) > 1500:
+        if actual and len(actual) + len(ln) > maximo:
             trozos.append(actual)
             actual = ""
         actual += ln + "\n"
     trozos.append(actual)
-    for t in trozos:
+    return trozos
+
+
+def enviar_telegram(texto: str) -> bool:
+    token, chat = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not (token and chat):
+        return False
+    for t in trocear(texto, 3500):
+        datos = urllib.parse.urlencode({"chat_id": chat, "text": t, "parse_mode": "Markdown",
+                                        "disable_web_page_preview": "true"}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=datos)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        time.sleep(1)
+    return True
+
+
+def enviar_whatsapp(texto: str) -> bool:
+    tel, key = os.getenv("WHATSAPP_TELEFONO"), os.getenv("WHATSAPP_APIKEY")
+    if not (tel and key):
+        return False
+    for t in trocear(texto):
         url = ("https://api.callmebot.com/whatsapp.php?"
                + urllib.parse.urlencode({"phone": tel, "text": t, "apikey": key}))
         with urllib.request.urlopen(url, timeout=30) as r:
@@ -262,6 +280,11 @@ def notificar(alertas: list[dict], cfg: dict, enviar: bool) -> None:
             canales.append("WhatsApp")
     except Exception as exc:
         print(f"Error enviando WhatsApp: {exc}", file=sys.stderr)
+    try:
+        if enviar_telegram(wa):
+            canales.append("Telegram")
+    except Exception as exc:
+        print(f"Error enviando Telegram: {exc}", file=sys.stderr)
     print(f"Avisos enviados por: {', '.join(canales) or 'ningún canal (revisa los secrets)'}")
 
 
