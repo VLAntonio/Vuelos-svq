@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """
-Alertas de vuelos baratos desde Sevilla.
+Alertas de vuelos baratos desde Sevilla (+ alojamiento barato y bien valorado + coche).
 
 Para cada destino y duración consulta el calendario de precios de Google Flights
-(todas las aerolíneas) y avisa por correo y/o WhatsApp cuando:
+(todas las aerolíneas) y avisa por Telegram (y/o correo) cuando:
   1) un precio baja del umbral (entra en zona barata), o
   2) estando ya bajo el umbral, vuelve a bajar respecto al último precio visto.
 Si el precio sube por encima del umbral, la alerta se "rearma" para la próxima bajada.
+Para los mejores chollos busca además alojamiento para esas mismas fechas (hoteles.py) y solo
+avisa de los destinos donde vuelo y alojamiento están bajo el umbral, con los coches más
+baratos (coches.py).
 
 Uso:
   python vuelos_alerta.py                # ejecución normal
   python vuelos_alerta.py --sin-enviar   # imprime los avisos sin mandarlos
   python vuelos_alerta.py --prueba-aviso # manda un mensaje de prueba y sale
 
-Variables de entorno (todas opcionales; sin ellas ese canal se desactiva):
+Variables de entorno (opcionales; sin ellas esa función se desactiva):
+  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+  SERPAPI_KEY                                   (búsqueda de alojamiento)
+  RAPIDAPI_KEY                                  (precios de alquiler de coche)
   SMTP_USUARIO, SMTP_PASSWORD, EMAIL_DESTINO, [SMTP_SERVIDOR=smtp.gmail.com, SMTP_PUERTO=465]
-  WHATSAPP_TELEFONO (+34...), WHATSAPP_APIKEY   (CallMeBot)
-  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID              (bot de Telegram)
 """
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import smtplib
@@ -33,6 +38,10 @@ from datetime import date, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
+import ciudades
+import coches
+import hoteles
+
 BASE = Path(__file__).resolve().parent
 RUTA_CONFIG = BASE / "config.toml"
 RUTA_ESTADO = BASE / "estado.json"
@@ -43,20 +52,30 @@ def cargar_config(ruta: Path = RUTA_CONFIG) -> dict:
     with open(ruta, "rb") as f:
         cfg = tomllib.load(f)
     umbrales: dict[str, float] = {}
+    umbral_noche: dict[str, float] = {}
     for grupo in cfg.get("grupos", {}).values():
         for d in grupo["destinos"]:
             umbrales[d] = float(grupo["umbral"])
+            if "umbral_hotel_noche" in grupo:
+                umbral_noche[d] = float(grupo["umbral_hotel_noche"])
     for d, u in cfg.get("umbral_destino", {}).items():
         umbrales[d] = float(u)
     cfg["umbrales"] = umbrales
+    cfg["umbral_noche"] = umbral_noche
     return cfg
 
 
 # ─────────────────────────── estado ───────────────────────────
 def cargar_estado(ruta: Path = RUTA_ESTADO) -> dict:
     if ruta.exists():
-        return json.loads(ruta.read_text(encoding="utf-8"))
-    return {}
+        est = json.loads(ruta.read_text(encoding="utf-8"))
+        if "vuelos" not in est:          # formato antiguo: todo eran vuelos
+            est = {"vuelos": est}
+    else:
+        est = {"vuelos": {}}
+    est.setdefault("hoteles", {})
+    est.setdefault("coches", {})
+    return est
 
 
 def guardar_estado(estado: dict, ruta: Path = RUTA_ESTADO) -> None:
@@ -94,7 +113,6 @@ def evaluar(precios: list[dict], estado: dict, umbrales: dict, bajada_minima: fl
         else:
             estado[k] = {"precio": actual, "bajo_umbral": False}
 
-    # limpiar fechas pasadas
     hoy_s = hoy.isoformat()
     for k in [k for k in estado if k.split("|")[1] < hoy_s]:
         del estado[k]
@@ -102,18 +120,24 @@ def evaluar(precios: list[dict], estado: dict, umbrales: dict, bajada_minima: fl
 
 
 # ─────────────────────────── Google Flights ───────────────────────────
-def enlace_google(origen: str, destino: str, ida: str, vuelta: str, moneda: str) -> str:
+def enlace_google_flights(origen: str, destino: str, ida: str, vuelta: str, moneda: str = "EUR") -> str:
     try:
         from fast_flights import FlightQuery, Passengers, create_query
         q = create_query(
             flights=[FlightQuery(date=ida, from_airport=origen, to_airport=destino),
                      FlightQuery(date=vuelta, from_airport=destino, to_airport=origen)],
-            trip="round-trip", passengers=Passengers(adults=1), currency=moneda,
+            trip="round-trip", passengers=Passengers(adults=1), currency=moneda, language="es",
         )
-        return q.url()
+        return q.url() + "&hl=es"
     except Exception:
-        texto = f"Flights from {origen} to {destino} on {ida} through {vuelta}"
-        return "https://www.google.com/travel/flights?q=" + urllib.parse.quote(texto)
+        texto = f"Vuelos de {origen} a {destino} el {ida} con vuelta el {vuelta}"
+        return "https://www.google.com/travel/flights?hl=es&curr=EUR&q=" + urllib.parse.quote(texto)
+
+
+def enlace_skyscanner(origen: str, destino: str, ida: str, vuelta: str) -> str:
+    f = lambda s: date.fromisoformat(s).strftime("%y%m%d")
+    return (f"https://www.skyscanner.es/transporte/vuelos/{origen.lower()}/{destino.lower()}/"
+            f"{f(ida)}/{f(vuelta)}/?adultsv2=1&cabinclass=economy&rtn=1")
 
 
 def consultar_precios(cfg: dict, hoy: date) -> tuple[list[dict], int, int]:
@@ -156,74 +180,136 @@ def consultar_precios(cfg: dict, hoy: date) -> tuple[list[dict], int, int]:
     return precios, ok, ko
 
 
+# ─────────────────────────── selección de destinos ───────────────────────────
+def seleccionar(alertas: list[dict], con_hoteles: bool) -> tuple[list[dict], list[str]]:
+    """
+    Agrupa las alertas por destino y decide qué se avisa.
+    Con búsqueda de alojamiento: solo destinos cuyo mejor vuelo tiene alojamiento que cumple.
+    Devuelve (paquetes, claves_pendientes). Las pendientes son de destinos cuyo alojamiento
+    no se llegó a buscar (límite, presupuesto o error): se reintentan en la siguiente pasada.
+    paquete = {"destino", "principal": alerta, "otras": [alertas]}
+    """
+    paquetes, pendientes = [], []
+    for dest, lst in agrupar(alertas).items():
+        if not con_hoteles:
+            paquetes.append({"destino": dest, "principal": lst[0], "otras": lst[1:]})
+            continue
+        princ = next((a for a in lst if "hoteles" in a), None)
+        if princ is None:
+            pendientes += [clave(a["destino"], a["ida"], a["vuelta"]) for a in lst]
+        elif princ["hoteles"]:
+            paquetes.append({"destino": dest, "principal": princ, "otras": [a for a in lst if a is not princ]})
+    paquetes.sort(key=lambda p: p["principal"]["precio"])
+    return paquetes, pendientes
+
+
 # ─────────────────────────── mensajes ───────────────────────────
 DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
-def fecha_corta(iso: str) -> str:
+def fecha_larga(iso: str) -> str:
     d = date.fromisoformat(iso)
-    return f"{DIAS[d.weekday()]} {d.day:02d}/{d.month:02d}"
+    return f"{DIAS[d.weekday()]} {d.day} {MESES[d.month - 1]}"
 
 
-def linea(a: dict) -> str:
-    extra = "🆕" if a["motivo"] == "nuevo" else f"⬇️ antes {a['anterior']:.0f}€"
-    return f"{a['precio']:.0f}€  {fecha_corta(a['ida'])} → {fecha_corta(a['vuelta'])}  {extra}"
+def noches(a: dict) -> int:
+    return (date.fromisoformat(a["vuelta"]) - date.fromisoformat(a["ida"])).days
+
+
+def eur(x: float) -> str:
+    return f"{x:.0f} €"
+
+
+def miles(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
 
 
 def agrupar(alertas: list[dict]) -> dict[str, list[dict]]:
     g: dict[str, list[dict]] = {}
     for a in sorted(alertas, key=lambda x: (x["destino"], x["precio"], x["ida"])):
         g.setdefault(a["destino"], []).append(a)
-    # destinos ordenados por su mejor precio
     return dict(sorted(g.items(), key=lambda kv: kv[1][0]["precio"]))
 
 
-def texto_whatsapp(alertas: list[dict], origen: str, max_por_destino: int = 3, max_destinos: int = 15) -> str:
-    g = agrupar(alertas)
-    partes = [f"✈️ *Vuelos baratos desde {origen}* ({len(alertas)} avisos)"]
-    for i, (dest, lst) in enumerate(g.items()):
-        if i >= max_destinos:
-            partes.append(f"…y {len(g) - max_destinos} destinos más (ver correo)")
-            break
-        partes.append(f"\n*{origen}→{dest}* (umbral {lst[0]['umbral']:.0f}€)")
-        partes += [linea(a) for a in lst[:max_por_destino]]
-        if len(lst) > max_por_destino:
-            partes.append(f"+{len(lst) - max_por_destino} fechas más")
+def enlace(url: str, texto: str) -> str:
+    return f'<a href="{html.escape(url)}">{html.escape(texto)}</a>'
+
+
+def bloque_paquete(paq: dict, origen: str, cfg: dict) -> list[str]:
+    a = paq["principal"]
+    dest = a["destino"]
+    pais = ciudades.pais(dest)
+    motivo = "🆕 nuevo" if a["motivo"] == "nuevo" else f"⬇️ antes {eur(a['anterior'])}"
+    L = [
+        "",
+        f"📍 <b>{html.escape(ciudades.nombre(dest))}</b>{' (' + pais + ')' if pais else ''} · {dest}",
+        f"📅 {fecha_larga(a['ida'])} → {fecha_larga(a['vuelta'])} ({noches(a)} noches)",
+        f"✈️ <b>{eur(a['precio'])}</b> ida y vuelta · {motivo}",
+        f"   🔗 {enlace(enlace_google_flights(origen, dest, a['ida'], a['vuelta']), 'Google Flights')}"
+        f" · {enlace(enlace_skyscanner(origen, dest, a['ida'], a['vuelta']), 'Skyscanner')}",
+    ]
+    total_viaje = a["precio"]
+
+    hs = a.get("hoteles")
+    if hs:
+        umbral = cfg["umbral_noche"].get(dest)
+        tope = cfg.get("hoteles", {}).get("max_mostrados", 0) or len(hs)
+        L.append(f"🏨 <b>{len(hs)} alojamientos</b> de menos de {eur(umbral)}/noche, "
+                 f"por ubicación, precio e instalaciones:")
+        for i, h in enumerate(hs[:tope], 1):
+            ub = f"{h['ubicacion']:.1f}" if h.get("ubicacion") is not None else "–"
+            L.append(f" {i}. {enlace(h['booking'], h['nombre'])}{' 🆕' if h.get('nuevo') else ''}"
+                     f" · <b>{eur(h['noche'])}</b>/noche · ⭐{h['nota']:.1f} ({miles(h['opiniones'])})"
+                     f" · 📍{ub} · 🛎{h['instalaciones']} · {enlace(h['google'], 'comparar')}")
+        if len(hs) > tope:
+            L.append(f"    …y {len(hs) - tope} más en los enlaces de abajo")
+        e = a.get("hoteles_enlaces") or {}
+        if e:
+            L.append(f"   🔎 Ver más, ya filtrados: {enlace(e['booking_centricos'], 'Booking · más céntricos')}"
+                     f" · {enlace(e['booking_valorados'], 'Booking · mejor nota y precio')}"
+                     f" · {enlace(e['google'], 'Google Hotels')}")
+        total_viaje += min(h["total"] for h in hs)
+
+    coches_lst = paq.get("coches")
+    if coches_lst:
+        L.append(f"🚗 Coches más baratos (aeropuerto, {noches(a)} días):")
+        for c in coches_lst:
+            detalles = " · ".join(x for x in (c["categoria"], c["cambio"]) if x)
+            L.append(f" • {html.escape(c['modelo'])} o similar{' (' + html.escape(detalles) + ')' if detalles else ''}"
+                     f"{' · ' + html.escape(c['empresa']) if c['empresa'] else ''}"
+                     f" — <b>{eur(c['total'])}</b> ({eur(c['dia'])}/día)")
+    if paq.get("coches_enlace"):
+        L.append(f"   🔎 {enlace(paq['coches_enlace'], 'Todos los coches por precio (Kayak)')}")
+
+    if hs:
+        extra = f" · {eur(total_viaje + coches_lst[0]['total'])} con coche" if coches_lst else ""
+        L.append(f"💰 <b>Vuelo + alojamiento desde {eur(total_viaje)}</b>{extra}")
+
+    otras = paq.get("otras") or []
+    if otras:
+        txt = ", ".join(f"{fecha_larga(o['ida'])}→{fecha_larga(o['vuelta'])} {eur(o['precio'])}" for o in otras[:5])
+        nota = " (alojamiento sin comprobar)" if hs is not None else ""
+        L.append(f"   ✈️ Otras fechas con vuelo barato{nota}: {txt}{'…' if len(otras) > 5 else ''}")
+    return L
+
+
+def texto_mensaje(paquetes: list[dict], origen: str, cfg: dict) -> str:
+    """Mensaje en HTML de Telegram. Cada línea es autocontenida (se puede trocear por líneas)."""
+    cfg_h = cfg.get("hoteles", {})
+    n = len(paquetes)
+    partes = [f"<b>✈️ Chollos desde Sevilla</b> · {n} destino{'s' if n != 1 else ''}"]
+    if any(p["principal"].get("hoteles") for p in paquetes):
+        partes.append(f"<i>Alojamientos: ⭐ nota ≥{cfg_h.get('valoracion_minima', 4.3)} con "
+                      f"{cfg_h.get('opiniones_minimas', 300)}+ opiniones, o ≥{cfg_h.get('valoracion_minima_nuevo', 4.6)} "
+                      f"si son nuevos (🆕). 📍 nota de ubicación · 🛎 nº de servicios.</i>")
+    for paq in paquetes:
+        partes += bloque_paquete(paq, origen, cfg)
     return "\n".join(partes)
 
 
-def html_correo(alertas: list[dict], cfg: dict) -> str:
-    g = agrupar(alertas)
-    filas = []
-    for dest, lst in g.items():
-        filas.append(f"<h3 style='margin:18px 0 6px'>{cfg['origen']} → {dest} "
-                     f"<small style='color:#777'>umbral {lst[0]['umbral']:.0f} €</small></h3><table cellpadding='4'>")
-        for a in lst:
-            url = enlace_google(cfg["origen"], dest, a["ida"], a["vuelta"], cfg["moneda"])
-            motivo = "nuevo" if a["motivo"] == "nuevo" else f"bajada desde {a['anterior']:.0f} €"
-            filas.append(f"<tr><td><b>{a['precio']:.0f} €</b></td><td>{fecha_corta(a['ida'])} → {fecha_corta(a['vuelta'])}</td>"
-                         f"<td style='color:#777'>{motivo}</td><td><a href='{url}'>ver en Google Flights</a></td></tr>")
-        filas.append("</table>")
-    return (f"<div style='font-family:sans-serif'><p>{len(alertas)} avisos de precio "
-            f"(ida y vuelta, 1 adulto, todas las aerolíneas).</p>{''.join(filas)}</div>")
-
-
 # ─────────────────────────── envío ───────────────────────────
-def enviar_correo(asunto: str, html: str, texto: str) -> bool:
-    usuario, pwd, dest = os.getenv("SMTP_USUARIO"), os.getenv("SMTP_PASSWORD"), os.getenv("EMAIL_DESTINO")
-    if not (usuario and pwd and dest):
-        return False
-    msg = EmailMessage()
-    msg["Subject"], msg["From"], msg["To"] = asunto, usuario, dest
-    msg.set_content(texto)
-    msg.add_alternative(html, subtype="html")
-    with smtplib.SMTP_SSL(os.getenv("SMTP_SERVIDOR", "smtp.gmail.com"), int(os.getenv("SMTP_PUERTO", "465"))) as s:
-        s.login(usuario, pwd)
-        s.send_message(msg)
-    return True
-
-
-def trocear(texto: str, maximo: int = 1500) -> list[str]:
+def trocear(texto: str, maximo: int = 3500) -> list[str]:
     trozos, actual = [], ""
     for ln in texto.split("\n"):
         if actual and len(actual) + len(ln) > maximo:
@@ -238,8 +324,8 @@ def enviar_telegram(texto: str) -> bool:
     token, chat = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not (token and chat):
         return False
-    for t in trocear(texto, 3500):
-        datos = urllib.parse.urlencode({"chat_id": chat, "text": t, "parse_mode": "Markdown",
+    for t in trocear(texto):
+        datos = urllib.parse.urlencode({"chat_id": chat, "text": t, "parse_mode": "HTML",
                                         "disable_web_page_preview": "true"}).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=datos)
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -248,43 +334,37 @@ def enviar_telegram(texto: str) -> bool:
     return True
 
 
-def enviar_whatsapp(texto: str) -> bool:
-    tel, key = os.getenv("WHATSAPP_TELEFONO"), os.getenv("WHATSAPP_APIKEY")
-    if not (tel and key):
+def enviar_correo(asunto: str, cuerpo_html: str) -> bool:
+    usuario, pwd, dest = os.getenv("SMTP_USUARIO"), os.getenv("SMTP_PASSWORD"), os.getenv("EMAIL_DESTINO")
+    if not (usuario and pwd and dest):
         return False
-    for t in trocear(texto):
-        url = ("https://api.callmebot.com/whatsapp.php?"
-               + urllib.parse.urlencode({"phone": tel, "text": t, "apikey": key}))
-        with urllib.request.urlopen(url, timeout=30) as r:
-            r.read()
-        time.sleep(3)
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = asunto, usuario, dest
+    msg.set_content("Abre este correo en un cliente que muestre HTML.")
+    msg.add_alternative(f"<div style='font-family:sans-serif'>{cuerpo_html.replace(chr(10), '<br>')}</div>",
+                        subtype="html")
+    with smtplib.SMTP_SSL(os.getenv("SMTP_SERVIDOR", "smtp.gmail.com"), int(os.getenv("SMTP_PUERTO", "465"))) as s:
+        s.login(usuario, pwd)
+        s.send_message(msg)
     return True
 
 
-def notificar(alertas: list[dict], cfg: dict, enviar: bool) -> None:
-    mejor = min(alertas, key=lambda a: a["precio"])
-    asunto = (f"✈️ {len(alertas)} vuelos baratos desde {cfg['origen']} — "
-              f"desde {mejor['precio']:.0f}€ a {mejor['destino']}")
-    wa = texto_whatsapp(alertas, cfg["origen"])
+def notificar(paquetes: list[dict], cfg: dict, enviar: bool) -> None:
+    mejor = paquetes[0]["principal"]
+    asunto = (f"✈️ {len(paquetes)} chollos desde Sevilla — "
+              f"desde {eur(mejor['precio'])} a {ciudades.nombre(mejor['destino'])}")
+    texto = texto_mensaje(paquetes, cfg["origen"], cfg)
     if not enviar:
-        print(asunto, "\n", wa, sep="")
+        print(asunto, "\n", texto, sep="")
         return
     canales = []
-    try:
-        if enviar_correo(asunto, html_correo(alertas, cfg), wa):
-            canales.append("correo")
-    except Exception as exc:
-        print(f"Error enviando correo: {exc}", file=sys.stderr)
-    try:
-        if enviar_whatsapp(wa):
-            canales.append("WhatsApp")
-    except Exception as exc:
-        print(f"Error enviando WhatsApp: {exc}", file=sys.stderr)
-    try:
-        if enviar_telegram(wa):
-            canales.append("Telegram")
-    except Exception as exc:
-        print(f"Error enviando Telegram: {exc}", file=sys.stderr)
+    for nombre, fn in (("Telegram", lambda: enviar_telegram(texto)),
+                       ("correo", lambda: enviar_correo(asunto, texto))):
+        try:
+            if fn():
+                canales.append(nombre)
+        except Exception as exc:
+            print(f"Error enviando por {nombre}: {exc}", file=sys.stderr)
     print(f"Avisos enviados por: {', '.join(canales) or 'ningún canal (revisa los secrets)'}")
 
 
@@ -298,10 +378,15 @@ def main() -> int:
     hoy = date.today()
 
     if args.prueba_aviso:
-        prueba = [{"destino": "LIS", "ida": (hoy + timedelta(days=30)).isoformat(),
-                   "vuelta": (hoy + timedelta(days=33)).isoformat(), "precio": 39.0,
-                   "motivo": "nuevo", "umbral": 60.0, "anterior": None}]
-        notificar(prueba, cfg, enviar=not args.sin_enviar)
+        # Vuelo ficticio a Lisboa, con búsqueda REAL de alojamiento y coches si hay claves
+        # (gasta 1 búsqueda de SerpApi y hasta 2 de RapidAPI).
+        ida = hoy + timedelta(days=30)
+        prueba = [{"destino": "LIS", "ida": ida.isoformat(), "vuelta": (ida + timedelta(days=3)).isoformat(),
+                   "precio": 39.0, "motivo": "nuevo", "umbral": 60.0, "anterior": None}]
+        hoteles.completar_alertas(prueba, cfg, {}, hoy)
+        paquetes = [{"destino": "LIS", "principal": prueba[0], "otras": []}]
+        coches.completar(paquetes, cfg, {}, hoy)
+        notificar(paquetes, cfg, enviar=not args.sin_enviar)
         return 0
 
     print(f"Consultando {len(cfg['umbrales'])} destinos × {len(cfg['duraciones'])} duraciones…")
@@ -309,14 +394,34 @@ def main() -> int:
     print(f"Peticiones OK: {ok}  fallidas: {ko}  precios leídos: {len(precios)}")
     if ok == 0:
         print("Ninguna petición funcionó: probablemente Google ha cambiado algo o nos ha bloqueado.", file=sys.stderr)
-        return 1   # GitHub Actions marca el run en rojo y te avisa por correo
+        return 1
 
     estado = cargar_estado()
-    alertas = evaluar(precios, estado, cfg["umbrales"], cfg["bajada_minima_eur"], hoy)
-    print(f"Alertas nuevas: {len(alertas)}")
-    if alertas:
-        notificar(alertas, cfg, enviar=not args.sin_enviar)
+    antes = dict(estado["vuelos"])
+    alertas = evaluar(precios, estado["vuelos"], cfg["umbrales"], cfg["bajada_minima_eur"], hoy)
+    print(f"Vuelos bajo el umbral (nuevos o más baratos): {len(alertas)}")
+
+    con_hoteles = hoteles.activo(cfg) and not args.sin_enviar
+    errores = False
+    if alertas and con_hoteles:
+        errores |= hoteles.completar_alertas(alertas, cfg, estado["hoteles"], hoy)
+    paquetes, pendientes = seleccionar(alertas, con_hoteles)
+    for k in pendientes:                       # se reconsideran en la siguiente pasada
+        if k in antes:
+            estado["vuelos"][k] = antes[k]
+        else:
+            estado["vuelos"].pop(k, None)
+    if con_hoteles:
+        print(f"Destinos con vuelo y alojamiento bajo el umbral: {len(paquetes)}"
+              f"  (pendientes para la próxima pasada: {len({k.split('|')[0] for k in pendientes})})")
+    if paquetes and not args.sin_enviar:
+        errores |= coches.completar(paquetes, cfg, estado["coches"], hoy)
+    if paquetes:
+        notificar(paquetes, cfg, enviar=not args.sin_enviar)
     guardar_estado(estado)
+    if errores:
+        print("Hubo errores en la búsqueda de alojamiento o coches (ver arriba).", file=sys.stderr)
+        return 1
     return 0
 
 

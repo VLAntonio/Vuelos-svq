@@ -24,42 +24,93 @@ bajada_minima_eur = 2
 bloque_dias = 60
 pausa_segundos = 2.0
 
-# ─── Umbrales por grupo (EUR, ida y vuelta) ──────────────────
+# ─── Alojamiento ─────────────────────────────────────────────
+# Para los mejores vuelos encontrados se busca alojamiento en Google Hotels
+# (agrupa Booking, Expedia, Hotels.com, la web del hotel…) para las mismas fechas.
+# Con la búsqueda de alojamiento activa, SOLO se avisa de los destinos donde
+# vuelo Y alojamiento están por debajo de su umbral.
+[hoteles]
+activado = true
+adultos = 1
+# Alojamientos con trayectoria: muchas opiniones y buena nota (nota de Google sobre 5)
+opiniones_minimas = 300
+valoracion_minima = 4.3          # 4,3/5 ≈ 8,6 en Booking
+# Alojamientos nuevos (con menos de `opiniones_minimas` opiniones): se exige más nota
+opiniones_minimas_nuevo = 20     # por debajo de esto no hay datos fiables
+valoracion_minima_nuevo = 4.6    # más de 4,5/5
+max_mostrados = 0                # 0 = mostrar todos los que cumplan
+orden_busqueda = "relevancia"    # relevancia | precio | valoracion | opiniones
+max_busquedas_por_ejecucion = 5  # destinos distintos por pasada
+presupuesto_mensual = 240        # el plan gratuito de SerpApi da 250
+cache_dias = 3                   # no repetir la misma búsqueda en estos días
+
+# Orden de los alojamientos en el aviso: peso de cada criterio (se normalizan solos)
+[hoteles.prioridad]
+ubicacion = 0.45                 # nota de ubicación de Google
+precio = 0.35                    # más barato, mejor
+instalaciones = 0.20             # nº de servicios (wifi, aire acond., piscina…)
+
+# ─── Alquiler de coche ───────────────────────────────────────
+# Para los destinos que se avisan, se muestran los coches más baratos (sin umbral)
+# con recogida y devolución en el aeropuerto de llegada.
+# Siempre se incluye un enlace a Kayak ordenado por precio; los precios concretos
+# requieren RAPIDAPI_KEY (API "Booking COM" de DataCrawler en RapidAPI).
+[coches]
+activado = true
+edad_conductor = 30              # menores de 25 suelen pagar recargo
+hora_recogida = "12:00"          # el día de llegada
+hora_devolucion = "10:00"        # el día de vuelta
+max_mostrados = 3
+presupuesto_mensual = 40         # ajústalo al límite de tu plan de RapidAPI
+cache_dias = 2
+
+# ─── Umbrales por grupo (EUR) ───────────────────────────────
+# umbral             = vuelo ida y vuelta
+# umbral_hotel_noche = precio máximo por noche del alojamiento
 # Un destino usa el umbral de su grupo salvo que tenga uno propio en [umbral_destino].
 [grupos.nacional]
 umbral = 30
+umbral_hotel_noche = 45
 destinos = ["LCG","ALC","LEI","OVD","BCN","BIO","IBZ","MAD","PMI","PNA","EAS","SDR","SCQ","VLC","VIT"]
 
 [grupos.canarias_melilla]
 umbral = 45
+umbral_hotel_noche = 50
 destinos = ["FUE","LPA","ACE","TFN","MLN"]
 
 [grupos.portugal_francia]
 umbral = 35
+umbral_hotel_noche = 50
 destinos = ["LIS","OPO","BOD","BES","LYS","MRS","MPL","NTE","BVA","CDG","ORY","RNS","TLS","BSL"]
 
 [grupos.reino_unido_irlanda]
 umbral = 35
+umbral_hotel_noche = 60
 destinos = ["BHX","BRS","EDI","LPL","LHR","LGW","LTN","STN","MAN","DUB","ORK"]
 
 [grupos.europa_central_norte]
 umbral = 45
+umbral_hotel_noche = 60
 destinos = ["AMS","EIN","RTM","BRU","CRL","FKB","BER","CGN","DUS","NRN","FRA","HAM","MUC","NUE","GVA","ZRH","CPH"]
 
 [grupos.italia]
 umbral = 35
+umbral_hotel_noche = 50
 destinos = ["BRI","BLQ","CAG","CTA","MXP","BGY","PSA","FCO","TSF","TRS","TRN","VCE"]
 
 [grupos.europa_este]
 umbral = 50
+umbral_hotel_noche = 35
 destinos = ["BEG","OTP","BUD","KRK","PRG","WAW","WRO"]
 
 [grupos.marruecos]
 umbral = 45
+umbral_hotel_noche = 30
 destinos = ["CMN","ESU","RAK","RBA"]
 
 [grupos.turquia]
 umbral = 80
+umbral_hotel_noche = 35
 destinos = ["IST","SAW"]
 
 # ─── Umbrales específicos que sustituyen al del grupo ────────
